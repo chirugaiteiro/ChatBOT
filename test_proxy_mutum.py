@@ -4,85 +4,100 @@ import json
 import time
 
 # --- Configuração da Página ---
-st.set_page_config(page_title="Lab de Teste Mutum: IMASUL", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Lab Mutum: Licenças IMASUL", page_icon="🏗️", layout="wide")
 
-st.title("🧪 Diagnóstico de Conectividade - Mutum V2.0")
+st.title("🧪 Diagnóstico de Conectividade: Licenças Ambientais")
 st.markdown("""
-**Objetivo:** Simular exatamente a requisição que o Frontend faz, mas via **Python (Backend)**.
-Se este teste funcionar, confirma que o erro de CORB é exclusivo do navegador e que a solução de Proxy é a correta.
+**Alvo:** Base de Licenças Ambientais do IMASUL (Camada 16).
+**Objetivo:** Verificar se o Python consegue baixar os DADOS brutos (GeoJSON).
+Se funcionar aqui, o Proxy resolverá o problema de CORB no sistema principal.
 """)
 
 st.divider()
 
-# --- 1. A Configuração (Cópia fiel do seu layers_environmental.js) ---
-TARGET_URL = "http://cartografia.imasul.ms.gov.br/server/rest/services/LIMITES_ADMINISTRATIVOS/MapServer/0/query"
+# --- 1. A Configuração ---
+# O Arquiteto forneceu a URL base. O Engenheiro adiciona '/16/query' para acessar os dados.
+BASE_URL = "https://www.pinms.ms.gov.br/arcgis/rest/services/IMASUL/licencas_ambientais/MapServer"
+LAYER_ID = 16
+TARGET_URL = f"{BASE_URL}/{LAYER_ID}/query"
+
+# Parâmetros para pedir GeoJSON
 PARAMS = {
-    "where": "1=1",
-    "outFields": "*",
-    "f": "geojson"  # <--- O formato que causa o CORB no navegador
+    "where": "1=1",           # Pega tudo (filtro padrão)
+    "outFields": "*",         # Pega todas as colunas
+    "f": "geojson",           # O formato que o navegador costuma bloquear
+    "resultRecordCount": 10   # LIMITA a 10 itens para o teste ser rápido e não travar
 }
 
-st.subheader("1. Parâmetros da Requisição")
-col1, col2 = st.columns(2)
+st.subheader("1. Configuração do Disparo")
+col1, col2 = st.columns([2, 1])
 with col1:
-    st.code(f"URL: {TARGET_URL}", language="http")
+    st.info(f"📡 **URL Alvo:** `{TARGET_URL}`")
 with col2:
     st.json(PARAMS)
 
 # --- 2. O Teste ---
-st.subheader("2. Executando Teste de Conexão...")
+st.subheader("2. Executando Teste...")
 
-if st.button("🚀 Disparar Requisição (Modo Python/Proxy)", type="primary"):
+if st.button("🚀 Disparar Requisição (Simular Proxy)", type="primary"):
     
     start_time = time.time()
     
     try:
-        with st.status("Conectando ao servidor do IMASUL...", expanded=True) as status:
+        with st.status("Negociando com servidor do IMASUL...", expanded=True) as status:
             
-            # Simulando um navegador real para evitar bloqueios simples de bot
+            # Headers para "enganar" firewalls simples, parecendo um navegador
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) MutumOS/Testing'
             }
             
-            st.write("📡 Enviando headers...", headers)
+            st.write("Enviando requisição...")
             
-            # A REQUISIÇÃO REAL
-            response = requests.get(TARGET_URL, params=PARAMS, headers=headers, timeout=15)
+            # O DISPARO REAL
+            response = requests.get(TARGET_URL, params=PARAMS, headers=headers, timeout=20)
             
             elapsed = time.time() - start_time
             
             if response.status_code == 200:
-                status.update(label="✅ Sucesso! Dados recebidos.", state="complete", expanded=False)
-                
-                # Processa o JSON
-                data = response.json()
-                features_count = len(data.get('features', []))
-                
-                st.success(f"Conexão estabelecida em {elapsed:.2f} segundos.")
-                
-                # --- 3. O Veredito ---
-                st.divider()
-                st.header("3. Veredito Técnico")
-                
-                col_a, col_b = st.columns([1, 2])
-                
-                with col_a:
-                    st.metric(label="Status HTTP", value=response.status_code)
-                    st.metric(label="Feições Encontradas", value=features_count)
+                # Tenta ler como JSON
+                try:
+                    data = response.json()
+                    features = data.get('features', [])
+                    count = len(features)
                     
-                    if features_count > 0:
-                        st.info("💡 **Conclusão:** O servidor permite acesso a dados via Python! O problema no site atual é puramente bloqueio de navegador (CORS).")
+                    if count > 0:
+                        status.update(label="✅ SUCESSO! Dados capturados.", state="complete", expanded=False)
+                        st.success(f"Conexão perfeita! Recebemos {count} registros em {elapsed:.2f}s.")
+                        
+                        # --- 3. Análise dos Dados ---
+                        st.divider()
+                        st.subheader("3. O que conseguimos ler?")
+                        
+                        # Mostra as propriedades do primeiro item para vermos os dados
+                        primeiro_item = features[0]['properties']
+                        st.write("**Exemplo de Dados (Propriedades do 1º registro):**")
+                        st.dataframe(primeiro_item)
+                        
+                        st.success("""
+                        **CONCLUSÃO DO ENGENHEIRO:**
+                        O servidor aceita conexões externas de script! 
+                        Isso confirma que podemos usar o Proxy para trazer esses dados para o mapa
+                        e gerar popups com essas informações.
+                        """)
+                        
                     else:
-                        st.warning("⚠️ O JSON veio vazio. Verifique os parâmetros.")
+                        status.update(label="⚠️ Resposta vazia.", state="error")
+                        st.warning("O servidor respondeu 200 OK, mas não mandou nenhuma 'feature' (dado geográfico).")
+                        st.json(data)
 
-                with col_b:
-                    st.subheader("Amostra dos Dados (GeoJSON)")
-                    st.json(data)
+                except json.JSONDecodeError:
+                    status.update(label="❌ Erro de Formato", state="error")
+                    st.error("O servidor respondeu, mas não é um JSON válido. Provavelmente é HTML de erro.")
+                    st.code(response.text[:500], language="html")
                     
             else:
-                status.update(label="❌ Erro na resposta.", state="error")
-                st.error(f"O servidor respondeu com erro: {response.status_code}")
-                st.text(response.text)
+                status.update(label="❌ Erro HTTP", state="error")
+                st.error(f"Erro {response.status_code}: {response.reason}")
 
     except Exception as e:
-        st.error(f"❌ Falha crítica na conexão: {str(e)}")
+        st.error(f"❌ Falha de Conexão: {str(e)}")
