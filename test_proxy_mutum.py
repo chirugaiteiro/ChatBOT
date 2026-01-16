@@ -1,115 +1,88 @@
 import streamlit as st
-import google.generativeai as genai
-import PyPDF2
-from io import BytesIO
+import requests
+import json
+import time
 
-# Configuração da Página
-st.set_page_config(page_title="Leitor de PDF com Gemini", page_icon="📄", layout="wide")
+# --- Configuração da Página ---
+st.set_page_config(page_title="Lab de Teste Mutum: IMASUL", page_icon="🧪", layout="wide")
 
-st.title("📄 Analisador de Documentos com Gemini")
-st.markdown("Faça upload de um PDF e peça para a IA extrair e organizar as informações.")
+st.title("🧪 Diagnóstico de Conectividade - Mutum V2.0")
+st.markdown("""
+**Objetivo:** Simular exatamente a requisição que o Frontend faz, mas via **Python (Backend)**.
+Se este teste funcionar, confirma que o erro de CORB é exclusivo do navegador e que a solução de Proxy é a correta.
+""")
 
-# --- BARRA LATERAL (Configurações) ---
-with st.sidebar:
-    st.header("Configurações")
-    api_key = st.text_input("Insira sua API Key do Google:", type="password")
-    st.markdown("[Obtenha sua chave aqui](https://aistudio.google.com/app/apikey)")
+st.divider()
+
+# --- 1. A Configuração (Cópia fiel do seu layers_environmental.js) ---
+TARGET_URL = "http://cartografia.imasul.ms.gov.br/server/rest/services/LIMITES_ADMINISTRATIVOS/MapServer/0/query"
+PARAMS = {
+    "where": "1=1",
+    "outFields": "*",
+    "f": "geojson"  # <--- O formato que causa o CORB no navegador
+}
+
+st.subheader("1. Parâmetros da Requisição")
+col1, col2 = st.columns(2)
+with col1:
+    st.code(f"URL: {TARGET_URL}", language="http")
+with col2:
+    st.json(PARAMS)
+
+# --- 2. O Teste ---
+st.subheader("2. Executando Teste de Conexão...")
+
+if st.button("🚀 Disparar Requisição (Modo Python/Proxy)", type="primary"):
     
-    # Escolha do modelo (Flash é mais rápido/barato, Pro é mais inteligente)
-    model_choice = st.selectbox("Escolha o Modelo:", ["gemini-1.5-flash", "gemini-1.5-pro"])
-
-# --- FUNÇÕES ---
-
-def extract_text_from_pdf(uploaded_file):
-    """Extrai texto cru do PDF usando PyPDF2"""
+    start_time = time.time()
+    
     try:
-        pdf_reader = PyPDF2.PdfReader(uploaded_file)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() or ""
-        return text
-    except Exception as e:
-        st.error(f"Erro ao ler PDF: {e}")
-        return None
+        with st.status("Conectando ao servidor do IMASUL...", expanded=True) as status:
+            
+            # Simulando um navegador real para evitar bloqueios simples de bot
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            st.write("📡 Enviando headers...", headers)
+            
+            # A REQUISIÇÃO REAL
+            response = requests.get(TARGET_URL, params=PARAMS, headers=headers, timeout=15)
+            
+            elapsed = time.time() - start_time
+            
+            if response.status_code == 200:
+                status.update(label="✅ Sucesso! Dados recebidos.", state="complete", expanded=False)
+                
+                # Processa o JSON
+                data = response.json()
+                features_count = len(data.get('features', []))
+                
+                st.success(f"Conexão estabelecida em {elapsed:.2f} segundos.")
+                
+                # --- 3. O Veredito ---
+                st.divider()
+                st.header("3. Veredito Técnico")
+                
+                col_a, col_b = st.columns([1, 2])
+                
+                with col_a:
+                    st.metric(label="Status HTTP", value=response.status_code)
+                    st.metric(label="Feições Encontradas", value=features_count)
+                    
+                    if features_count > 0:
+                        st.info("💡 **Conclusão:** O servidor permite acesso a dados via Python! O problema no site atual é puramente bloqueio de navegador (CORS).")
+                    else:
+                        st.warning("⚠️ O JSON veio vazio. Verifique os parâmetros.")
 
-def process_with_gemini(text_input, prompt_instructions):
-    """Envia o texto e as instruções para o Gemini"""
-    if not api_key:
-        st.warning("Por favor, insira sua API Key na barra lateral.")
-        return None
-    
-    genai.configure(api_key=api_key)
-    
-    # Configuração do modelo
-    model = genai.GenerativeModel(model_choice)
-    
-    # Prompt estruturado
-    full_prompt = f"""
-    Você é um assistente especialista em análise de documentos.
-    
-    Abaixo está o conteúdo extraído de um arquivo PDF:
-    ---
-    {text_input}
-    ---
-    
-    SEU OBJETIVO:
-    {prompt_instructions}
-    
-    IMPORTANTE:
-    - Responda de forma direta e organizada (use tabelas Markdown se houver dados tabulares).
-    - Se a informação não estiver no texto, diga "Informação não encontrada".
-    """
-    
-    with st.spinner('O Gemini está analisando o documento...'):
-        try:
-            response = model.generate_content(full_prompt)
-            return response.text
-        except Exception as e:
-            st.error(f"Erro na API do Gemini: {e}")
-            return None
-
-# --- INTERFACE PRINCIPAL ---
-
-uploaded_file = st.file_uploader("Arraste seu PDF aqui", type=['pdf'])
-
-if uploaded_file is not None:
-    # 1. Extração do Texto
-    pdf_text = extract_text_from_pdf(uploaded_file)
-    
-    if pdf_text:
-        # Mostra um preview do texto (opcional, bom para debug)
-        with st.expander("Ver texto extraído (Cru)"):
-            st.text(pdf_text[:1000] + "...") # Mostra apenas os primeiros 1000 caracteres
-
-        st.divider()
-
-        # 2. Área de Prompt
-        st.subheader("O que você deseja extrair?")
-        
-        # Sugestões rápidas
-        col1, col2, col3 = st.columns(3)
-        prompt_type = st.radio(
-            "Exemplos de comando:",
-            ["Resumir o documento", "Extrair tabela de dados", "Identificar datas e valores", "Comando Personalizado"],
-            horizontal=True
-        )
-
-        user_prompt = ""
-        if prompt_type == "Resumir o documento":
-            user_prompt = "Faça um resumo executivo deste documento em tópicos."
-        elif prompt_type == "Extrair tabela de dados":
-            user_prompt = "Identifique quaisquer dados estruturados e apresente-os em uma tabela Markdown."
-        elif prompt_type == "Identificar datas e valores":
-            user_prompt = "Liste todas as datas importantes e valores monetários encontrados, explicando a que se referem."
-        else:
-            user_prompt = st.text_area("Digite sua instrução específica:", placeholder="Ex: Encontre o nome do contratante e a cláusula de rescisão...")
-
-        # 3. Botão de Ação
-        if st.button("Processar Documento", type="primary"):
-            if user_prompt:
-                result = process_with_gemini(pdf_text, user_prompt)
-                if result:
-                    st.success("Análise concluída!")
-                    st.markdown(result)
+                with col_b:
+                    st.subheader("Amostra dos Dados (GeoJSON)")
+                    st.json(data)
+                    
             else:
-                st.warning("Por favor, defina uma instrução.")
+                status.update(label="❌ Erro na resposta.", state="error")
+                st.error(f"O servidor respondeu com erro: {response.status_code}")
+                st.text(response.text)
+
+    except Exception as e:
+        st.error(f"❌ Falha crítica na conexão: {str(e)}")
