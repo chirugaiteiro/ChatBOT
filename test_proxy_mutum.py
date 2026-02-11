@@ -1,103 +1,104 @@
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
 import requests
-import json
-import time
 
-# --- Configuração da Página ---
-st.set_page_config(page_title="Lab Mutum: Licenças IMASUL", page_icon="🏗️", layout="wide")
+# Configuração da página
+st.set_page_config(page_title="Roteirizador Simples", page_icon="🗺️", layout="wide")
 
-st.title("🧪 Diagnóstico de Conectividade: Licenças Ambientais")
-st.markdown("""
-**Alvo:** Base de Licenças Ambientais do IMASUL (Camada 16).
-**Objetivo:** Verificar se o Python consegue baixar os DADOS brutos (GeoJSON).
-Se funcionar aqui, o Proxy resolverá o problema de CORB no sistema principal.
-""")
+st.title("🗺️ Planejador de Rotas com Distância")
+st.markdown("Insira as coordenadas de origem e destino para gerar a rota e calcular a distância.")
 
-st.divider()
-
-# --- 1. A Configuração ---
-# O Arquiteto forneceu a URL base. O Engenheiro adiciona '/16/query' para acessar os dados.
-BASE_URL = "https://www.pinms.ms.gov.br/arcgis/rest/services/IMASUL/licencas_ambientais/MapServer"
-LAYER_ID = 16
-TARGET_URL = f"{BASE_URL}/{LAYER_ID}/query"
-
-# Parâmetros para pedir GeoJSON
-PARAMS = {
-    "where": "1=1",           # Pega tudo (filtro padrão)
-    "outFields": "*",         # Pega todas as colunas
-    "f": "geojson",           # O formato que o navegador costuma bloquear
-    "resultRecordCount": 10   # LIMITA a 10 itens para o teste ser rápido e não travar
-}
-
-st.subheader("1. Configuração do Disparo")
-col1, col2 = st.columns([2, 1])
-with col1:
-    st.info(f"📡 **URL Alvo:** `{TARGET_URL}`")
-with col2:
-    st.json(PARAMS)
-
-# --- 2. O Teste ---
-st.subheader("2. Executando Teste...")
-
-if st.button("🚀 Disparar Requisição (Simular Proxy)", type="primary"):
+# --- Barra Lateral para Inputs ---
+with st.sidebar:
+    st.header("📍 Coordenadas")
     
-    start_time = time.time()
+    st.subheader("Origem (Ponto A)")
+    # Valores padrão (Ex: Av. Paulista, SP)
+    lat_origem = st.number_input("Latitude Origem", value=-23.561684, format="%.6f")
+    lon_origem = st.number_input("Longitude Origem", value=-46.655981, format="%.6f")
+
+    st.subheader("Destino (Ponto B)")
+    # Valores padrão (Ex: Parque Ibirapuera, SP)
+    lat_destino = st.number_input("Latitude Destino", value=-23.587416, format="%.6f")
+    lon_destino = st.number_input("Longitude Destino", value=-46.657634, format="%.6f")
+
+    btn_calcular = st.button("Gerar Rota 🚗", type="primary")
+
+# --- Função para buscar a rota (Backend) ---
+def get_route(lat_start, lon_start, lat_end, lon_end):
+    # OSRM usa ordem Longitude, Latitude
+    loc_start = f"{lon_start},{lat_start}"
+    loc_end = f"{lon_end},{lat_end}"
+    
+    # URL da API pública do OSRM (Serviço de roteamento gratuito)
+    url = f"http://router.project-osrm.org/route/v1/driving/{loc_start};{loc_end}?overview=full&geometries=geojson"
     
     try:
-        with st.status("Negociando com servidor do IMASUL...", expanded=True) as status:
+        r = requests.get(url)
+        data = r.json()
+        
+        if data.get("code") != "Ok":
+            return None, None
             
-            # Headers para "enganar" firewalls simples, parecendo um navegador
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) MutumOS/Testing'
-            }
-            
-            st.write("Enviando requisição...")
-            
-            # O DISPARO REAL
-            response = requests.get(TARGET_URL, params=PARAMS, headers=headers, timeout=20)
-            
-            elapsed = time.time() - start_time
-            
-            if response.status_code == 200:
-                # Tenta ler como JSON
-                try:
-                    data = response.json()
-                    features = data.get('features', [])
-                    count = len(features)
-                    
-                    if count > 0:
-                        status.update(label="✅ SUCESSO! Dados capturados.", state="complete", expanded=False)
-                        st.success(f"Conexão perfeita! Recebemos {count} registros em {elapsed:.2f}s.")
-                        
-                        # --- 3. Análise dos Dados ---
-                        st.divider()
-                        st.subheader("3. O que conseguimos ler?")
-                        
-                        # Mostra as propriedades do primeiro item para vermos os dados
-                        primeiro_item = features[0]['properties']
-                        st.write("**Exemplo de Dados (Propriedades do 1º registro):**")
-                        st.dataframe(primeiro_item)
-                        
-                        st.success("""
-                        **CONCLUSÃO DO ENGENHEIRO:**
-                        O servidor aceita conexões externas de script! 
-                        Isso confirma que podemos usar o Proxy para trazer esses dados para o mapa
-                        e gerar popups com essas informações.
-                        """)
-                        
-                    else:
-                        status.update(label="⚠️ Resposta vazia.", state="error")
-                        st.warning("O servidor respondeu 200 OK, mas não mandou nenhuma 'feature' (dado geográfico).")
-                        st.json(data)
-
-                except json.JSONDecodeError:
-                    status.update(label="❌ Erro de Formato", state="error")
-                    st.error("O servidor respondeu, mas não é um JSON válido. Provavelmente é HTML de erro.")
-                    st.code(response.text[:500], language="html")
-                    
-            else:
-                status.update(label="❌ Erro HTTP", state="error")
-                st.error(f"Erro {response.status_code}: {response.reason}")
-
+        # Extrair a rota (geometria) e a distância
+        route_geometry = data["routes"][0]["geometry"]
+        distance_meters = data["routes"][0]["distance"]
+        
+        return route_geometry, distance_meters
     except Exception as e:
-        st.error(f"❌ Falha de Conexão: {str(e)}")
+        st.error(f"Erro ao conectar com serviço de rotas: {e}")
+        return None, None
+
+# --- Lógica Principal ---
+if btn_calcular:
+    with st.spinner("Calculando a melhor rota..."):
+        geometry, distance = get_route(lat_origem, lon_origem, lat_destino, lon_destino)
+    
+    if geometry and distance is not None:
+        # Converter metros para quilômetros
+        km = distance / 1000
+        
+        # 1. Exibir Métricas
+        col1, col2 = st.columns(2)
+        col1.metric("Distância Total", f"{km:.2f} km")
+        col2.metric("Status", "Rota Encontrada ✅")
+        
+        # 2. Criar o Mapa
+        # Centralizar o mapa na média das coordenadas
+        center_lat = (lat_origem + lat_destino) / 2
+        center_lon = (lon_origem + lon_destino) / 2
+        
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
+        
+        # Adicionar Marcador de Origem
+        folium.Marker(
+            [lat_origem, lon_origem], 
+            popup="Origem", 
+            icon=folium.Icon(color="green", icon="play")
+        ).add_to(m)
+        
+        # Adicionar Marcador de Destino
+        folium.Marker(
+            [lat_destino, lon_destino], 
+            popup="Destino", 
+            icon=folium.Icon(color="red", icon="stop")
+        ).add_to(m)
+        
+        # Desenhar a Linha da Rota (GeoJSON)
+        folium.GeoJson(
+            geometry,
+            name="Rota",
+            style_function=lambda x: {'color': 'blue', 'weight': 5, 'opacity': 0.7}
+        ).add_to(m)
+        
+        # Renderizar o mapa no Streamlit
+        st_folium(m, width=None, height=500)
+        
+    else:
+        st.error("Não foi possível encontrar uma rota entre esses pontos. Verifique se são acessíveis por carro.")
+else:
+    # Mostra um mapa inicial apenas para não ficar vazio
+    st.info("Insira as coordenadas na barra lateral e clique em 'Gerar Rota'.")
+    m = folium.Map(location=[-23.5505, -46.6333], zoom_start=10)
+    st_folium(m, width=None, height=500)
