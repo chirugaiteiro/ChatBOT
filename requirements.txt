@@ -1,3 +1,4 @@
 streamlit
-google-generativeai
-pypdf2
+folium
+streamlit-folium
+requests
