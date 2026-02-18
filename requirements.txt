@@ -1,4 +1,4 @@
-geopy.distance
+geopy
 streamlit
 pandas
 openrouteservice
