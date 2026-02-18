@@ -1,3 +1,4 @@
+geodesic
 streamlit
 pandas
 openrouteservice
