@@ -42,10 +42,13 @@ PORTO_MANGA_POLYGON = {
     ]]
 }
 
+# PONTO DE DESVIO ESTRATÉGICO (Ponte BR-262 / Porto Morrinho)
+PONTE_BR262 = [-57.129748, -19.246586]
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Configurações")
-    api_key = st.text_input("API Key (OpenRouteService):", type="password")
+    api_key = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImU5OTg5N2VmZmI5MzRjYjk5YjkwNTRkNzY3MGMxZDE2IiwiaCI6Im11cm11cjY0In0="
 
 # --- FUNÇÕES DE LIMPEZA E CONVERSÃO ---
 def dms_para_decimal(dms_str):
@@ -165,6 +168,7 @@ def processar_rota(client, dados_carga):
     if len(coords_ors) < 2:
         return None, None, None, None, None, None, None, "Erro: Mínimo 2 pontos necessários para traçar uma rota."
 
+    aviso_restricao = None
     try:
         # A Mágica de bloqueio acontece aqui no campo 'options'
         route = client.directions(
@@ -172,13 +176,104 @@ def processar_rota(client, dados_carga):
             profile='driving-hgv',
             format='geojson',
             extra_info=['surface'],
-            options={"avoid_polygons": PORTO_MANGA_POLYGON}
+            options={
+                "avoid_polygons": PORTO_MANGA_POLYGON,
+                "avoid_features": ["ferries"]
+            }
         )
     except Exception as e:
-        return None, None, None, None, None, None, None, f"Erro API (O trajeto pode ser impossível sem a balsa?): {e}"
+        # Se o erro for limite de distância (Code 2004), tenta sem o bloqueio
+        if '2004' in str(e):
+            rota_calculada = False
+            
+            # TENTATIVA 2: Forçar passagem pela Ponte BR-262
+            # Cenário A: Rota Simples (A -> B)
+            if len(coords_ors) == 2:
+                try:
+                    coords_desvio = [coords_ors[0], PONTE_BR262, coords_ors[1]]
+                    route = client.directions(
+                        coordinates=coords_desvio,
+                        profile='driving-hgv',
+                        format='geojson',
+                        extra_info=['surface']
+                    )
+                    aviso_restricao = "✅ Rota >150km. Desvio automático via Ponte BR-262 aplicado."
+                    coords_ors = coords_desvio # Atualiza para mostrar o ponto extra no mapa
+                    rota_calculada = True
+                except Exception:
+                    pass 
+            
+            # Cenário B: Rota Ida e Volta (A -> B -> A)
+            elif len(coords_ors) == 3:
+                # Verifica se o último ponto é próximo do primeiro (indica retorno)
+                start_pt = (coords_ors[0][1], coords_ors[0][0])
+                end_pt = (coords_ors[-1][1], coords_ors[-1][0])
+                if geodesic(start_pt, end_pt).km < 10: # 10km de tolerância para considerar retorno
+                    try:
+                        # Insere a ponte na ida E na volta: A -> Ponte -> B -> Ponte -> A
+                        coords_desvio = [coords_ors[0], PONTE_BR262, coords_ors[1], PONTE_BR262, coords_ors[2]]
+                        route = client.directions(
+                            coordinates=coords_desvio,
+                            profile='driving-hgv',
+                            format='geojson',
+                            extra_info=['surface']
+                        )
+                        aviso_restricao = "✅ Rota Ida/Volta >150km. Desvio Ponte BR-262 aplicado (2x)."
+                        coords_ors = coords_desvio
+                        rota_calculada = True
+                    except Exception:
+                        pass
+            
+            # TENTATIVA 3: Se o polígono falhou, tenta pelo menos evitar BALSAS (mais leve para a API)
+            if not rota_calculada:
+                try:
+                    route = client.directions(
+                        coordinates=coords_ors, 
+                        profile='driving-hgv', 
+                        format='geojson', 
+                        extra_info=['surface'],
+                        options={'avoid_features': ['ferries']}
+                    )
+                    aviso_restricao = "⚠️ Rota >150km. Polígono ignorado, mas BALSAS evitadas."
+                    rota_calculada = True
+                except Exception:
+                    pass
+
+            # TENTATIVA 4: Fallback final (libera a rota original sem bloqueios)
+            if not rota_calculada:
+                try:
+                    aviso_restricao = "⚠️ Rota >150km. Bloqueio Porto da Manga ignorado (Limite API)."
+                    route = client.directions(coordinates=coords_ors, profile='driving-hgv', format='geojson', extra_info=['surface'])
+                except Exception as e2:
+                    return None, None, None, None, None, None, None, f"Erro API (Tentativa sem bloqueio falhou): {e2}"
+        else:
+            return None, None, None, None, None, None, None, f"Erro API (O trajeto pode ser impossível sem a balsa?): {e}"
 
     extras = route['features'][0]['properties']['extras']['surface']
     geometry = route['features'][0]['geometry']['coordinates']
+    
+    # --- AJUSTE INTELIGENTE DO LINK GOOGLE MAPS ---
+    # Verifica se a rota calculada passou pela Ponte BR-262. Se sim, força esse ponto no link.
+    coords_para_link = list(coords_ors)
+    ponte_lat_lon = (PONTE_BR262[1], PONTE_BR262[0])
+    passou_pela_ponte = False
+
+    for pt in geometry: # pt = [lon, lat]
+        # Otimização: Checagem rápida de bounding box (~5km) antes do cálculo geodésico
+        if abs(pt[1] - ponte_lat_lon[0]) < 0.05 and abs(pt[0] - ponte_lat_lon[1]) < 0.05:
+            if geodesic((pt[1], pt[0]), ponte_lat_lon).km < 2.0:
+                passou_pela_ponte = True
+                break
+    
+    if passou_pela_ponte:
+        # Se passou pela ponte mas ela não estava na lista original, adiciona para o Google Maps obedecer
+        if len(coords_ors) == 2:
+             coords_para_link = [coords_ors[0], PONTE_BR262, coords_ors[1]]
+        elif len(coords_ors) == 3:
+             # Se for ida e volta (pontas próximas), adiciona na ida e na volta
+             if geodesic((coords_ors[0][1], coords_ors[0][0]), (coords_ors[-1][1], coords_ors[-1][0])).km < 10:
+                 coords_para_link = [coords_ors[0], PONTE_BR262, coords_ors[1], PONTE_BR262, coords_ors[2]]
+
     dist_paved = 0
     dist_unpaved = 0
     
@@ -231,7 +326,9 @@ def processar_rota(client, dados_carga):
     km_unpaved = dist_unpaved / 1000
     total = (km_unpaved * 1.09) + (km_paved * 1.03) + total_manual
 
-    link = "https://www.google.com/maps/dir/" + "/".join(coords_gmaps_orig)
+    # Gera o link baseado nas coordenadas FINAIS (coords_ors), que podem conter o desvio da ponte
+    # Usa coords_para_link para garantir que o Google Maps siga o desvio da ponte se necessário
+    link = "https://www.google.com/maps/dir/" + "/".join([f"{c[1]},{c[0]}" for c in coords_para_link])
     
     detalhes = {
         "Asfalto (KM)": round(km_paved, 2),
@@ -240,6 +337,9 @@ def processar_rota(client, dados_carga):
         "Custo Asfalto (+3%)": round(km_paved * 1.03, 2),
         "Custo Chão (+9%)": round(km_unpaved * 1.09, 2)
     }
+    
+    if aviso_restricao:
+        detalhes["⚠️ AVISO"] = aviso_restricao
     
     return total, link, detalhes, route, coords_ors, debug_segments, resumo_tipos, None
 
@@ -328,8 +428,74 @@ if st.button("🚀 Calcular Rota", type="primary"):
 if st.session_state['dados_rota']:
     resultados = st.session_state['dados_rota']
     
+    # --- PROCESSAMENTO DOS DADOS PARA O DASHBOARD ---
+    lista_resumo = []
+    
+    for carga_id, resultado in resultados.items():
+        total, link, detalhes, route_data, coords_data, debug_segments, resumo_tipos, erro = resultado
+        
+        if not erro:
+            custo_total = detalhes["Custo Asfalto (+3%)"] + detalhes["Custo Chão (+9%)"]
+            lista_resumo.append({
+                "Carga": str(carga_id),
+                "Distância Total (km)": round(total, 2),
+                "Asfalto (km)": detalhes["Asfalto (KM)"],
+                "Chão (km)": detalhes["Chão (KM)"],
+                "Custo Estimado (pts)": round(custo_total, 2),
+                "Link Google Maps": link
+            })
+    
+    df_dashboard = pd.DataFrame(lista_resumo)
+    
+    # --- DASHBOARD SUPERIOR ---
     st.divider()
-    st.subheader("📋 Resultados Finais")
+    st.title("📊 Dashboard Gerencial de Logística")
+    
+    if not df_dashboard.empty:
+        # 1. KPIs (Indicadores Chave)
+        col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+        
+        total_km_geral = df_dashboard["Distância Total (km)"].sum()
+        total_custo_geral = df_dashboard["Custo Estimado (pts)"].sum()
+        total_chao = df_dashboard["Chão (km)"].sum()
+        perc_chao = (total_chao / total_km_geral * 100) if total_km_geral > 0 else 0
+        
+        col_kpi1.metric("Total de Cargas", len(df_dashboard))
+        col_kpi2.metric("KM Total Percorrido", f"{total_km_geral:,.2f} km")
+        col_kpi3.metric("Custo Total (Estimado)", f"{total_custo_geral:,.2f}")
+        col_kpi4.metric("% de Chão na Operação", f"{perc_chao:.1f}%")
+        
+        # 2. Gráficos e Tabela
+        c_chart, c_table = st.columns([1, 2])
+        
+        with c_chart:
+            st.subheader("🛣️ Perfil de Rodagem")
+            # Prepara dados para o gráfico (Carga como índice)
+            df_chart = df_dashboard.set_index("Carga")[["Asfalto (km)", "Chão (km)"]]
+            st.bar_chart(df_chart, color=["#555555", "#8B4513"], stack=True)
+            
+        with c_table:
+            st.subheader("� Resumo Executivo")
+            st.dataframe(
+                df_dashboard[["Carga", "Distância Total (km)", "Asfalto (km)", "Chão (km)", "Custo Estimado (pts)"]],
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Botão de Download
+            csv = df_dashboard.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Baixar Resumo em CSV",
+                data=csv,
+                file_name='resumo_rotas_logistica.csv',
+                mime='text/csv',
+            )
+    else:
+        st.warning("Nenhuma rota foi calculada com sucesso para gerar o dashboard.")
+
+    # --- DETALHAMENTO INDIVIDUAL (ABAS) ---
+    st.divider()
+    st.subheader("🔎 Detalhamento Técnico por Carga")
     
     # Cria uma aba dinâmica para cada Número de Carga
     nomes_cargas = [f"📦 {str(c)}" for c in resultados.keys()]
@@ -347,11 +513,11 @@ if st.session_state['dados_rota']:
                 c2.metric("Asfalto (Base)", f"{detalhes['Asfalto (KM)']} km")
                 c3.metric("Chão (Base)", f"{detalhes['Chão (KM)']} km")
                 
-                st.write("### Detalhamento Financeiro")
+                st.write("### Composição de Custo")
                 st.json(detalhes)
                 
                 st.markdown(f"**🗺️ Abrir Rota {carga_id} no Google Maps**")
-                st.markdown(f"[Clique aqui para abrir no Google Maps]({link})")
+                st.link_button("🔗 Abrir no Google Maps", link)
                 
                 st.subheader("📍 Mapa Interativo")
                 # Gera o mapa específico desta carga
