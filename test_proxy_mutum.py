@@ -388,6 +388,17 @@ def processar_rota(client, dados_carga):
             "Coord_Fim": f"{p_end[1]:.5f}, {p_end[0]:.5f}"
         })
 
+    # --- AJUSTE DE PRECISÃO (NORMALIZAÇÃO) ---
+    # A geometria (pontos) é uma simplificação visual. A distância do 'summary' é a real do odômetro.
+    # Ajustamos proporcionalmente os segmentos para que a soma bata com a distância oficial.
+    official_distance = route['features'][0]['properties']['summary']['distance']
+    total_calculated = dist_paved + dist_unpaved
+    
+    if total_calculated > 0:
+        factor = official_distance / total_calculated
+        dist_paved *= factor
+        dist_unpaved *= factor
+
     km_paved = dist_paved / 1000
     km_unpaved = dist_unpaved / 1000
     total = (km_unpaved * 1.09) + (km_paved * 1.03) + total_manual
