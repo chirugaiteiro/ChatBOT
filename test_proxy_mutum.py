@@ -12,11 +12,8 @@ st.set_page_config(page_title="Roteirizador Híbrido", layout="wide")
 st.title("🚛 Calculadora de Rota: Asfalto vs Chão")
 st.markdown("""
 **Instruções:**
-Faça o upload da sua planilha (CSV ou Excel) contendo a coluna **Coordenadas** ou digite os dados manualmente.
-O sistema aceita:
-1. **Decimal Padrão:** `-19.55, -54.22`
-2. **GPS/DMS:** `19°15'35.2"S 57°14'00.1"W`
-3. **Excel BR:** `-19,55; -54,22`
+Faça o upload da sua planilha (CSV ou Excel) contendo a coluna **Coordenadas** e a coluna **Número Carga**.
+O sistema vai processar cada carga separadamente e evitar rotas pelo Porto da Manga.
 """)
 
 # --- CONSTANTES ---
@@ -27,6 +24,22 @@ ORS_SURFACE_MAPPING = {
     5: "cobblestone", 6: "metal", 7: "wood", 8: "compacted", 9: "fine_gravel",
     10: "gravel", 11: "dirt", 12: "earth", 13: "ice", 14: "salt", 15: "sand",
     16: "woodchips", 17: "grass", 18: "grass_paver"
+}
+
+# COORDENADAS E ZONA DE BLOQUEIO (PORTO DA MANGA)
+LAT_MANGA = -19.25973252213004
+LON_MANGA = -57.233418110785635
+OFFSET = 0.03 # Margem de ~3.3km para cada lado criando um quadrado de bloqueio seguro
+
+PORTO_MANGA_POLYGON = {
+    "type": "Polygon",
+    "coordinates": [[
+        [LON_MANGA - OFFSET, LAT_MANGA - OFFSET],
+        [LON_MANGA + OFFSET, LAT_MANGA - OFFSET],
+        [LON_MANGA + OFFSET, LAT_MANGA + OFFSET],
+        [LON_MANGA - OFFSET, LAT_MANGA + OFFSET],
+        [LON_MANGA - OFFSET, LAT_MANGA - OFFSET]
+    ]]
 }
 
 # --- SIDEBAR ---
@@ -61,7 +74,7 @@ def limpar_e_converter(texto):
                 lat = dms_para_decimal(matches[0])
                 lon = dms_para_decimal(matches[1])
                 return lat, lon
-            return None, None # Evita vazar para o validador decimal se for GMS mal formatado
+            return None, None
 
         texto_limpo = texto.replace(';', ' ').replace(',', '.') 
         numeros = re.findall(r'-?\d+\.\d+|-?\d+', texto.replace(',', '.'))
@@ -103,7 +116,6 @@ def gerar_mapa_folium(route, coords_ors):
         
         eh_chao = surf_type in UNPAVED_TYPES
         color = '#8B4513' if eh_chao else '#555555'
-        
         tipo_pt = "Chão (+9%)" if eh_chao else "Asfalto (+3%)"
         tooltip_text = f"Superfície: {surf_type} | Status: {tipo_pt}"
 
@@ -115,6 +127,10 @@ def gerar_mapa_folium(route, coords_ors):
             tooltip=f"Ponto {i+1}",
             icon=folium.Icon(color="green" if i == 0 else "red" if i == len(coords_ors)-1 else "blue", icon="info-sign")
         ).add_to(m)
+
+    # Adiciona a zona de bloqueio do Porto da Manga no mapa apenas para visualização
+    zona_bloqueio = [[lat, lon] for lon, lat in PORTO_MANGA_POLYGON['coordinates'][0]]
+    folium.Polygon(zona_bloqueio, color='red', fill=True, fillOpacity=0.2, tooltip="Zona de Restrição: Porto da Manga").add_to(m)
 
     bbox = route['bbox'] 
     m.fit_bounds([[bbox[1], bbox[0]], [bbox[3], bbox[2]]])
@@ -129,7 +145,7 @@ def gerar_mapa_folium(route, coords_ors):
     m.get_root().html.add_child(folium.Element(legend_html))
     return m
 
-# --- PROCESSAMENTO DO LOTE ---
+# --- PROCESSAMENTO INDIVIDUAL DA ROTA ---
 def processar_rota(client, dados_carga):
     coords_raw_list = dados_carga['Coordenada'].tolist()
     total_manual = dados_carga['KM Adicional'].fillna(0).sum()
@@ -141,7 +157,6 @@ def processar_rota(client, dados_carga):
         lat, lon = limpar_e_converter(c_raw)
         
         if lat is None:
-            # Corrigido: Retornando 8 valores para evitar ValueError (Unpacking Error)
             return None, None, None, None, None, None, None, f"Erro no formato da coordenada: {c_raw}"
             
         coords_ors.append([lon, lat])
@@ -151,14 +166,16 @@ def processar_rota(client, dados_carga):
         return None, None, None, None, None, None, None, "Erro: Mínimo 2 pontos necessários para traçar uma rota."
 
     try:
+        # A Mágica de bloqueio acontece aqui no campo 'options'
         route = client.directions(
             coordinates=coords_ors,
             profile='driving-hgv',
             format='geojson',
             extra_info=['surface'],
+            options={"avoid_polygons": PORTO_MANGA_POLYGON}
         )
     except Exception as e:
-        return None, None, None, None, None, None, None, f"Erro API: {e}"
+        return None, None, None, None, None, None, None, f"Erro API (O trajeto pode ser impossível sem a balsa?): {e}"
 
     extras = route['features'][0]['properties']['extras']['surface']
     geometry = route['features'][0]['geometry']['coordinates']
@@ -214,7 +231,6 @@ def processar_rota(client, dados_carga):
     km_unpaved = dist_unpaved / 1000
     total = (km_unpaved * 1.09) + (km_paved * 1.03) + total_manual
 
-    # Corrigido: Link funcional do Google Maps
     link = "https://www.google.com/maps/dir/" + "/".join(coords_gmaps_orig)
     
     detalhes = {
@@ -240,18 +256,16 @@ with aba_upload:
     arquivo_upload = st.file_uploader("Faça upload da sua planilha (CSV ou Excel)", type=["csv", "xlsx"])
     if arquivo_upload:
         try:
-            # Tenta ler como CSV ou Excel dependendo da extensão
             if arquivo_upload.name.endswith('.csv'):
                 df_upload = pd.read_csv(arquivo_upload)
-                # Se o CSV usar ponto e vírgula como separador (padrão do Excel BR), corrige a leitura
                 if len(df_upload.columns) == 1:
                     arquivo_upload.seek(0)
                     df_upload = pd.read_csv(arquivo_upload, sep=';')
             else:
                 df_upload = pd.read_excel(arquivo_upload)
             
-            # Procura por uma coluna chamada 'Coordenadas' ou 'Coordenada' ignorando maiúsculas e minúsculas
             col_coords = [col for col in df_upload.columns if 'coordenada' in col.lower()]
+            col_carga = [col for col in df_upload.columns if 'carga' in col.lower()]
             
             if not col_coords:
                 st.error("⚠️ A planilha precisa ter uma coluna chamada 'Coordenadas'.")
@@ -260,27 +274,36 @@ with aba_upload:
                 with st.expander("Visualizar dados importados"):
                     st.dataframe(df_upload.head())
                 
-                # Prepara o DataFrame final que será enviado para o processador
                 df_para_processar = pd.DataFrame()
-                df_para_processar['Coordenada'] = df_upload[col_coords[0]].dropna()
+                df_para_processar['Coordenada'] = df_upload[col_coords[0]]
+                
+                # Resgata o nome da carga ou define como única
+                if col_carga:
+                    df_para_processar['Carga'] = df_upload[col_carga[0]]
+                else:
+                    df_para_processar['Carga'] = "Única"
                 
                 if 'KM Adicional' in df_upload.columns:
                     df_para_processar['KM Adicional'] = pd.to_numeric(df_upload['KM Adicional'], errors='coerce').fillna(0)
                 else:
                     df_para_processar['KM Adicional'] = 0.0
+                
+                # Remove linhas vazias e preenche nomes de carga faltantes
+                df_para_processar = df_para_processar.dropna(subset=['Coordenada'])
+                df_para_processar['Carga'] = df_para_processar['Carga'].fillna("Desconhecida")
                     
         except Exception as e:
             st.error(f"Erro ao ler o arquivo: {e}")
 
 with aba_manual:
     df_template = pd.DataFrame({
-        'Coordenada': ['-19.5724, -57.0289', '-19,0069; -57,6523'],
-        'KM Adicional': [0.0, 5.0]
+        'Carga': ['Carga 01', 'Carga 01', 'Carga 02', 'Carga 02'],
+        'Coordenada': ['-19.5724, -57.0289', '-19,0069; -57,6523', '-20.5085, -54.6549', '-20.5515, -54.6680'],
+        'KM Adicional': [0.0, 5.0, 0.0, 0.0]
     })
-    st.write("Cole seus pontos abaixo (útil para testes rápidos):")
+    st.write("Insira o identificador na coluna 'Carga' para separar os cálculos:")
     edited_df = st.data_editor(df_template, num_rows="dynamic", use_container_width=True)
     
-    # Se o usuário não fez upload, usa a inserção manual como fonte de dados
     if df_para_processar is None:
         df_para_processar = edited_df
 
@@ -290,45 +313,56 @@ if st.button("🚀 Calcular Rota", type="primary"):
     elif df_para_processar is None or df_para_processar.empty:
         st.warning("Insira dados válidos na tabela ou faça upload de uma planilha.")
     else:
-        with st.spinner("Traçando rota no servidor... Isso pode levar alguns segundos dependendo da distância."):
+        with st.spinner("Processando rotas e bloqueando Porto da Manga..."):
             client = openrouteservice.Client(key=api_key)
-            st.session_state['dados_rota'] = processar_rota(client, df_para_processar)
+            resultados_por_carga = {}
+            
+            # Agrupa os dados por carga mantendo a ordem (sort=False)
+            for carga_id, df_carga in df_para_processar.groupby('Carga', sort=False):
+                # O processar_rota agora é rodado isoladamente para CADA caminhão/carga
+                resultados_por_carga[carga_id] = processar_rota(client, df_carga)
+                
+            st.session_state['dados_rota'] = resultados_por_carga
 
-# Verifica se existe resultado salvo na memória e exibe
+# Renderização dos resultados separados por Carga usando Abas (Tabs)
 if st.session_state['dados_rota']:
-    total, link, detalhes, route_data, coords_data, debug_segments, resumo_tipos, erro = st.session_state['dados_rota']
+    resultados = st.session_state['dados_rota']
     
     st.divider()
-    if erro:
-        st.error(erro)
-    else:
-        st.subheader("📋 Resultado Final")
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Calculado (KM)", f"{total:.2f}")
-        c2.metric("Asfalto (Base)", f"{detalhes['Asfalto (KM)']} km")
-        c3.metric("Chão (Base)", f"{detalhes['Chão (KM)']} km")
-        
-        st.write("### Detalhamento")
-        st.json(detalhes)
-        
-        st.success("Rota gerada com sucesso!")
-        st.markdown(f"**🗺️ Abrir Rota no Google Maps**")
-        st.markdown(f"[Clique aqui para abrir no Google Maps]({link})")
-        
-        st.subheader("📍 Mapa Interativo")
-        mapa = gerar_mapa_folium(route_data, coords_data)
-        st_folium(mapa, width=1000, height=500)
-        
-        with st.expander("📊 Resumo por Tipo de Superfície (Tira-Teima)"):
-            st.write("Abaixo, o total de KM encontrado para cada etiqueta específica do mapa:")
-            df_resumo = pd.DataFrame(list(resumo_tipos.items()), columns=['Tipo de Superfície', 'Metros'])
-            df_resumo['KM'] = (df_resumo['Metros'] / 1000).round(3)
-            df_resumo = df_resumo[['Tipo de Superfície', 'KM']].sort_values(by='KM', ascending=False)
-            st.dataframe(df_resumo, use_container_width=True)
-        
-        with st.expander("🔍 Detalhes Técnicos (Debug dos Segmentos)"):
-            st.write("Visualização em Tabela:")
-            st.dataframe(pd.DataFrame(debug_segments), use_container_width=True)
-            st.write("📋 **Para análise de erro:** Copie o código abaixo e envie no chat:")
-            st.code(json.dumps(debug_segments, indent=2, ensure_ascii=False), language='json')
+    st.subheader("📋 Resultados Finais")
+    
+    # Cria uma aba dinâmica para cada Número de Carga
+    nomes_cargas = [f"📦 {str(c)}" for c in resultados.keys()]
+    abas_cargas = st.tabs(nomes_cargas)
+    
+    for idx, (carga_id, resultado) in enumerate(resultados.items()):
+        with abas_cargas[idx]:
+            total, link, detalhes, route_data, coords_data, debug_segments, resumo_tipos, erro = resultado
+            
+            if erro:
+                st.error(f"Erro ao processar Rota da Carga {carga_id}: {erro}")
+            else:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Calculado (KM)", f"{total:.2f}")
+                c2.metric("Asfalto (Base)", f"{detalhes['Asfalto (KM)']} km")
+                c3.metric("Chão (Base)", f"{detalhes['Chão (KM)']} km")
+                
+                st.write("### Detalhamento Financeiro")
+                st.json(detalhes)
+                
+                st.markdown(f"**🗺️ Abrir Rota {carga_id} no Google Maps**")
+                st.markdown(f"[Clique aqui para abrir no Google Maps]({link})")
+                
+                st.subheader("📍 Mapa Interativo")
+                # Gera o mapa específico desta carga
+                mapa = gerar_mapa_folium(route_data, coords_data)
+                st_folium(mapa, width=1000, height=500, key=f"mapa_{carga_id}")
+                
+                with st.expander("📊 Resumo por Tipo de Superfície (Tira-Teima)"):
+                    df_resumo = pd.DataFrame(list(resumo_tipos.items()), columns=['Tipo de Superfície', 'Metros'])
+                    df_resumo['KM'] = (df_resumo['Metros'] / 1000).round(3)
+                    df_resumo = df_resumo[['Tipo de Superfície', 'KM']].sort_values(by='KM', ascending=False)
+                    st.dataframe(df_resumo, use_container_width=True)
+                
+                with st.expander("🔍 Detalhes Técnicos (Debug dos Segmentos)"):
+                    st.dataframe(pd.DataFrame(debug_segments), use_container_width=True)
