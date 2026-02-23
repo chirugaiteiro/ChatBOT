@@ -4,6 +4,7 @@ import openrouteservice
 from geopy.distance import geodesic
 import re
 import folium
+from folium import plugins
 from streamlit_folium import st_folium
 import json
 
@@ -91,11 +92,65 @@ def limpar_e_converter(texto):
         pass
     return None, None
 
+# --- FUNÇÃO GERADORA DE KML ---
+def gerar_kml(geometry_coords, nome_rota):
+    kml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>{}</name>
+    <Style id="lineStyle">
+      <LineStyle>
+        <color>ff0000ff</color>
+        <width>4</width>
+      </LineStyle>
+    </Style>
+    <Placemark>
+      <name>Trajeto</name>
+      <styleUrl>#lineStyle</styleUrl>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>""".format(nome_rota)
+    
+    coords_str = " ".join([f"{lon},{lat},0" for lon, lat in geometry_coords])
+    
+    kml_footer = """</coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>"""
+    return kml_content + coords_str + kml_footer
+
 # --- FUNÇÃO DE GERAÇÃO DE MAPA ---
 def gerar_mapa_folium(route, coords_ors):
     start_lat = coords_ors[0][1]
     start_lon = coords_ors[0][0]
-    m = folium.Map(location=[start_lat, start_lon], zoom_start=12)
+    m = folium.Map(location=[start_lat, start_lon], zoom_start=12, tiles='OpenStreetMap')
+
+    # Adiciona camadas extras (Satélite e Mapa Claro)
+    folium.TileLayer('cartodbpositron', name='Mapa Claro').add_to(m)
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri',
+        name='Satélite',
+        overlay=False,
+        control=True
+    ).add_to(m)
+    
+    folium.TileLayer(
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        attr='Google',
+        name='Google Satélite',
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+        attr='Google',
+        name='Google Híbrido',
+        overlay=False,
+        control=True
+    ).add_to(m)
 
     extras = route['features'][0]['properties']['extras']['surface']
     geometry = route['features'][0]['geometry']['coordinates']
@@ -137,6 +192,17 @@ def gerar_mapa_folium(route, coords_ors):
 
     bbox = route['bbox'] 
     m.fit_bounds([[bbox[1], bbox[0]], [bbox[3], bbox[2]]])
+
+    # Plugins de utilidade para logística
+    plugins.Fullscreen(
+        position='topleft',
+        title='Tela Cheia',
+        title_cancel='Sair',
+        force_separate_button=True
+    ).add_to(m)
+    plugins.MousePosition(position='topright').add_to(m)
+    plugins.MeasureControl(position='bottomleft', primary_length_unit='kilometers').add_to(m)
+    folium.LayerControl().add_to(m)
     
     legend_html = '''
      <div style="position: fixed; bottom: 50px; right: 50px; width: 130px; height: 90px; z-index:9999; font-size:14px; background-color: white; border:2px solid grey; border-radius:6px; padding: 10px; opacity: 0.9;">
@@ -333,9 +399,11 @@ def processar_rota(client, dados_carga):
     detalhes = {
         "Asfalto (KM)": round(km_paved, 2),
         "Chão (KM)": round(km_unpaved, 2),
+        "Total KM (Asfalto + Chão)": round(km_paved + km_unpaved, 2),
         "Adicional (KM)": round(total_manual, 2),
         "Custo Asfalto (+3%)": round(km_paved * 1.03, 2),
-        "Custo Chão (+9%)": round(km_unpaved * 1.09, 2)
+        "Custo Chão (+9%)": round(km_unpaved * 1.09, 2),
+        "Total Custo (Asfalto + Chão)": round((km_paved * 1.03) + (km_unpaved * 1.09), 2)
     }
     
     if aviso_restricao:
@@ -436,11 +504,15 @@ if st.session_state['dados_rota']:
         
         if not erro:
             custo_total = detalhes["Custo Asfalto (+3%)"] + detalhes["Custo Chão (+9%)"]
+            km_total_real = detalhes["Total KM (Asfalto + Chão)"]
+            perc_chao = (detalhes["Chão (KM)"] / km_total_real * 100) if km_total_real > 0 else 0
+            
             lista_resumo.append({
                 "Carga": str(carga_id),
                 "Distância Total (km)": round(total, 2),
                 "Asfalto (km)": detalhes["Asfalto (KM)"],
                 "Chão (km)": detalhes["Chão (KM)"],
+                "% Chão": round(perc_chao, 1),
                 "Custo Estimado (pts)": round(custo_total, 2),
                 "Link Google Maps": link
             })
@@ -477,7 +549,7 @@ if st.session_state['dados_rota']:
         with c_table:
             st.subheader("� Resumo Executivo")
             st.dataframe(
-                df_dashboard[["Carga", "Distância Total (km)", "Asfalto (km)", "Chão (km)", "Custo Estimado (pts)"]],
+                df_dashboard[["Carga", "Distância Total (km)", "Asfalto (km)", "Chão (km)", "% Chão", "Custo Estimado (pts)"]],
                 use_container_width=True,
                 hide_index=True
             )
@@ -519,6 +591,17 @@ if st.session_state['dados_rota']:
                 st.markdown(f"**🗺️ Abrir Rota {carga_id} no Google Maps**")
                 st.link_button("🔗 Abrir no Google Maps", link)
                 
+                # Botão de Exportação KML
+                if route_data and 'features' in route_data:
+                    geo_coords = route_data['features'][0]['geometry']['coordinates']
+                    kml_str = gerar_kml(geo_coords, f"Rota {carga_id}")
+                    st.download_button(
+                        label="📥 Baixar Rota em KML",
+                        data=kml_str,
+                        file_name=f"rota_{carga_id}.kml",
+                        mime="application/vnd.google-earth.kml+xml"
+                    )
+
                 st.subheader("📍 Mapa Interativo")
                 # Gera o mapa específico desta carga
                 mapa = gerar_mapa_folium(route_data, coords_data)
